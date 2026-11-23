@@ -37,7 +37,8 @@
     var card = el('div', 'card pad');
     card.appendChild(el('h1', null, 'Facilitator sign-in'));
     card.appendChild(el('p', 'secondary',
-      'Enter the facilitator key printed in the server\'s terminal when it started.'));
+      'Enter your facilitator key \u2014 the FACILITATOR_KEY you set when you ' +
+      'put the site online. Students never need it.'));
     var inp = document.createElement('input');
     inp.type = 'password';
     inp.placeholder = 'Facilitator key';
@@ -78,7 +79,8 @@
       });
       App.net.on('facilitatorDenied', function () {
         sessionStorage.removeItem('scm-fac-key');
-        askKey('That key was not accepted. Check the server terminal and try again.');
+        askKey('That key was not accepted. It is the FACILITATOR_KEY you set ' +
+               'when you put the site online \u2014 check it and try again.');
       });
       App.net.on('denied', function (m) {
         toast('Refused: ' + m.action + ' (' + m.reason + ')', 'warn');
@@ -104,6 +106,20 @@
   /* Same reasoning as the student client: don't replace live buttons on every
      incoming state broadcast. */
   var SIGS = {};
+
+  /* The facilitator always gets the full set of controls: they are driving a
+     demonstration, not working through a stage. */
+  /* Students click words, not numbers, so the dashboard and the export show
+     the same words back. */
+  var CONF_WORDS = { 1: 'guessing', 3: 'fairly sure', 5: 'sure' };
+  function confWord(v) { return CONF_WORDS[v] || String(v == null ? '' : v); }
+
+  var FULL_CONTROLS = {
+    views: ['levels', 'gap', 'fuels', 'electricity',
+            'placeboSpace', 'placeboTime', 'loo'],
+    show: ['dropDonor', 't0', 'weights', 'predictors']
+  };
+
 
   /* ---------------------------------------------------------------- render */
 
@@ -175,6 +191,29 @@
     if (SIGS.toolbar === sig) return;
     SIGS.toolbar = sig;
     App.toolHost.innerHTML = '';
+
+    /* The two links side by side, because which link is which is the thing
+       facilitators get wrong. The key never appears in the student link. */
+    var links = el('div', 'link-strip');
+    var studentUrl = location.origin + location.pathname.replace(/facilitator\/?$/, '');
+    links.innerHTML =
+      '<div><span class="link-tag">Give students</span>' +
+      '<code>' + C.esc(studentUrl) + '</code></div>' +
+      '<div><span class="link-tag warn">Keep for yourself</span>' +
+      '<code>' + C.esc(location.origin + location.pathname) + '</code>' +
+      '<span class="small muted"> \u2014 this page. Never show the key on a slide.</span></div>';
+    var copy = el('button', 'sm', 'Copy the student link');
+    copy.type = 'button';
+    copy.addEventListener('click', function () {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(studentUrl).then(function () {
+          toast('Student link copied. Paste it in your chat or on a slide.');
+        }, function () { toast('Could not copy \u2014 select the link and copy it.'); });
+      } else { toast('Select the link above and copy it.'); }
+    });
+    links.appendChild(copy);
+    App.toolHost.appendChild(links);
+
     var tb = el('div', 'toolbar');
 
     function add(label, cls, fn, opts) {
@@ -255,7 +294,7 @@
     SIGS.tabs = App.tab;
     App.tabHost.innerHTML = '';
     var seg = el('div', 'seg');
-    [['rooms', 'Rooms'], ['present', 'Presentation'], ['compare', 'Compare all four']]
+    [['rooms', 'Rooms'], ['present', 'Presentation'], ['compare', 'Compare rooms']]
       .forEach(function (t) {
         var b = el('button', App.tab === t[0] ? 'on' : '', t[1]);
         b.type = 'button';
@@ -280,8 +319,8 @@
       var card = el('div', 'card pad fac-room' + (frozen ? ' frozen' : ''));
 
       var hd = el('div', 'fr-head');
-      hd.innerHTML = '<h3>Room ' + id + ' — ' + r.occupancy + '/' + r.capacity +
-        ' connected</h3><span class="pill ' +
+      hd.innerHTML = '<h3>Room ' + id + ' \u2014 ' + r.occupancy + ' connected</h3>' +
+        '<span class="pill ' +
         (frozen ? 'frozen' : r.occupancy ? 'live' : 'empty') + '">' +
         (frozen ? 'paused' : r.occupancy ? 'live' : 'empty') + '</span>';
       card.appendChild(hd);
@@ -359,7 +398,7 @@
       if (latest) {
         ab.innerHTML = '<div class="tiny muted">Latest answer · ' + C.esc(latest.st.title) +
           (r.confidence && r.confidence[latest.st.key]
-            ? ' · confidence ' + r.confidence[latest.st.key].value + '/5' : '') + '</div>' +
+            ? ' · ' + confWord(r.confidence[latest.st.key].value) : '') + '</div>' +
           '<div class="small">' + C.esc(latest.a.text.slice(0, 400)) +
           (latest.a.text.length > 400 ? '…' : '') + '</div>';
       } else {
@@ -440,7 +479,7 @@
     App.driveId = id;
     App.drivePanel = panel;
     App.driveScrim = scrim;
-    panel.update({ model: s.rooms[id].model, locked: false });
+    panel.update({ model: s.rooms[id].model, locked: false, controls: FULL_CONTROLS });
   }
 
   /** Keep an open room-drive modal in step with incoming state. */
@@ -450,7 +489,9 @@
       App.driveId = null; App.drivePanel = null; App.driveScrim = null;
       return;
     }
-    App.drivePanel.update({ model: App.st.rooms[App.driveId].model, locked: false });
+    App.drivePanel.update({
+      model: App.st.rooms[App.driveId].model, locked: false, controls: FULL_CONTROLS
+    });
   }
 
   /* ------------------------------------------------------ presentation tab */
@@ -497,18 +538,18 @@
     head.style.marginBottom = '14px';
     var hr = el('div', 'spread');
     var hl = el('div');
-    hl.appendChild(el('h2', null, 'Presenting to all four rooms'));
+    hl.appendChild(el('h2', null, 'Presenting to every room'));
     hl.appendChild(el('p', 'small secondary',
       'Everything you change below appears on every student screen immediately.'));
     hr.appendChild(hl);
     var apply = el('button', '', 'Apply this model to all rooms…');
     apply.type = 'button';
     apply.addEventListener('click', function () {
-      if (confirm('Overwrite all four rooms\' shared models with the model you are ' +
+      if (confirm('Overwrite every room\'s shared model with the model you are ' +
                   'presenting?\n\nThis replaces the settings each group was working on. ' +
                   'Their written answers are not affected.')) {
         send('fac:applyToAll', { confirm: true, model: c.presentModel });
-        toast('Applied the demonstrated model to all four rooms.');
+        toast('Applied the demonstrated model to every room.');
       }
     });
     hr.appendChild(apply);
@@ -536,7 +577,9 @@
       });
     }
     App.body.appendChild(App.presentHost);
-    App.presentPanel.update({ model: c.presentModel, locked: false });
+    App.presentPanel.update({
+      model: c.presentModel, locked: false, controls: FULL_CONTROLS
+    });
   }
 
   /* ---------------------------------------------------------- compare tab */
@@ -545,22 +588,36 @@
     var s = App.st, b = App.bundle;
     App.body.innerHTML = '';
     var card = el('div', 'card pad');
-    card.appendChild(el('h2', null, 'All four rooms, side by side'));
+    card.appendChild(el('h2', null, 'Every room in use, side by side'));
     card.appendChild(el('p', 'secondary',
       'Each room\'s own model, drawn on the same axes. Use this to open the discussion: ' +
-      'the rooms made different choices, so they have different estimates.'));
+      'the rooms made different choices, so they have different estimates. ' +
+      'Empty rooms are left out.'));
 
+    // Only rooms that have someone in them or have done something; the chart
+    // tops out at eight distinguishable colours.
+    var active = s.config.roomIds.filter(function (id) {
+      var r = s.rooms[id];
+      return r.occupancy > 0 || r.lastChange ||
+             (r.answers && Object.keys(r.answers).some(function (k) {
+               return r.answers[k].text.trim();
+             }));
+    });
+    if (!active.length) active = s.config.roomIds.slice(0, 1);
+    var charted = active.slice(0, 8);
     var views = [];
-    s.config.roomIds.forEach(function (id) {
+    active.forEach(function (id) {
       try { views.push({ id: id, room: s.rooms[id], v: MV.compute(b, s.rooms[id].model) }); }
       catch (e) { views.push({ id: id, room: s.rooms[id], v: null }); }
     });
 
-    // One chart, four gap lines
+    // One chart, one gap line per room in use (capped at 8 series)
     var host = el('div', 'chart-host');
     host.style.marginTop = '12px';
     card.appendChild(host);
-    var series = views.filter(function (x) { return x.v; }).map(function (x, i) {
+    var series = views.filter(function (x) {
+      return x.v && charted.indexOf(x.id) >= 0;
+    }).map(function (x, i) {
       return {
         name: 'Room ' + x.id, values: x.v.gap,
         color: C.cssVar(Charts.SERIES[i % 8]), label: 'Room ' + x.id
@@ -597,7 +654,7 @@
              '<td>' + (v.effect.latest >= 0 ? '+' : '') + v.effect.latest.toFixed(2) + '</td>' +
              '<td>' + v.stats.ratio.toFixed(2) + '</td>'
            : '<td colspan="5" class="muted">not solvable</td>') +
-        '<td>' + (lastConf ? lastConf + '/5' : '—') + '</td></tr>';
+        '<td>' + (lastConf ? confWord(lastConf) : '—') + '</td></tr>';
     });
     t += '</tbody></table></div>';
     card.appendChild(el('div', null, t));
@@ -607,7 +664,7 @@
     ans.style.marginTop = '18px';
     ans.appendChild(el('h4', null, 'Written answers'));
     s.stages.forEach(function (st) {
-      var any = s.config.roomIds.some(function (id) {
+      var any = active.some(function (id) {
         var a = s.rooms[id].answers && s.rooms[id].answers[st.key];
         return a && a.text.trim();
       });
@@ -618,13 +675,13 @@
         C.esc(st.ask)));
       var g = el('div', 'fac-grid');
       g.style.marginTop = '8px';
-      s.config.roomIds.forEach(function (id) {
+      active.forEach(function (id) {
         var a = s.rooms[id].answers && s.rooms[id].answers[st.key];
         if (!a || !a.text.trim()) return;
         var cc = el('div', 'card pad');
         var cf = s.rooms[id].confidence && s.rooms[id].confidence[st.key];
         cc.innerHTML = '<div class="tiny muted">Room ' + id +
-          (cf ? ' · confidence ' + cf.value + '/5' : '') + '</div><div class="small">' +
+          (cf ? ' · ' + confWord(cf.value) : '') + '</div><div class="small">' +
           C.esc(a.text) + '</div>';
         g.appendChild(cc);
       });
@@ -647,7 +704,7 @@
     payload.rooms.forEach(function (r) {
       r.answers.forEach(function (a) {
         rows.push([r.room, a.stage, a.title, a.question, a.answer,
-                   a.confidence === null ? '' : a.confidence,
+                   a.confidence === null ? '' : confWord(a.confidence),
                    a.lastEditor || '', a.updatedAt ? new Date(a.updatedAt).toISOString() : '']);
       });
     });

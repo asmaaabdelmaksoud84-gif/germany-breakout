@@ -16,13 +16,17 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const ws = require('./ws.js');
 const OT = require('./ot.js');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const ROOM_IDS = [1, 2, 3, 4];
-const ROOM_CAPACITY = parseInt(process.env.ROOM_CAPACITY || '4', 10);
+const ROOM_COUNT = parseInt(process.env.ROOM_COUNT || '10', 10);
+const ROOM_IDS = Array.from({ length: ROOM_COUNT }, (_, i) => i + 1);
+// 0 means no limit: a room just reports how many people are in it, so the
+// whole class can pile into one room for a demonstration.
+const ROOM_CAPACITY = parseInt(process.env.ROOM_CAPACITY || '0', 10);
 const SEAT_TIMEOUT_MS = parseInt(process.env.SEAT_TIMEOUT_MS || '120000', 10);
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'classroom-state.json');
 const FACILITATOR_KEY = process.env.FACILITATOR_KEY ||
@@ -35,45 +39,43 @@ const HISTORY_MAX = 400;
 const STAGES = [
   {
     key: 's1',
-    title: 'Choose the comparison group',
-    prompt: 'Germany cannot be compared with itself. Which countries should stand in for ' +
-            '"Germany without the phase-out"? Look at the donor pool and decide which ' +
-            'countries belong in it — and say why any you exclude do not belong.',
-    ask: 'Which countries did your group keep in the donor pool, and why?'
+    title: 'The claim',
+    prompt: 'The published model is already loaded. Check its donor weights against ' +
+            'the ones the paper printed.',
+    ask: 'Do the donor weights on your screen match the five the paper printed? ' +
+         'And what does it mean that over half of "synthetic Germany" is one country?'
   },
   {
     key: 's2',
-    title: 'Build synthetic Germany',
-    prompt: 'The method picks country weights so that synthetic Germany matches the real ' +
-            'Germany before 2011. You control which characteristics it tries to match, and ' +
-            'how much each one counts. Watch the pre-2011 fit (RMSPE) as you change them.',
-    ask: 'Which predictors mattered most for getting a good pre-2011 fit? What happened ' +
-         'to the donor weights as you changed their importance?'
+    title: 'Build it yourself',
+    prompt: 'You choose how much each characteristic counts; the method works out ' +
+            'which countries go into the blend. Watch the pre-2011 fit as you change it.',
+    ask: 'What pre-2011 fit did you get with the published weights, and what did you ' +
+         'get when the data chose? Does either match the 0.218 the paper reports?'
   },
   {
     key: 's3',
     title: 'Read off the effect',
-    prompt: 'The gap between Germany and synthetic Germany after 2011 is the estimated ' +
-            'effect of the phase-out. Switch between the level plot, the gap plot, the ' +
-            'breakdown by fuel, and the electricity mix.',
-    ask: 'What is your group\'s estimate of the effect, and how does it change over ' +
-         '2011–2023? Which fuel drives it?'
+    prompt: 'The distance between the two lines after 2011 is the estimated effect. ' +
+            'Split it by fuel, and look at what replaced the nuclear power.',
+    ask: 'What is your group\u2019s estimate of the effect, and how does it change ' +
+         'from 2011 to 2023? Which fuel drives it, and does the gap close?'
   },
   {
     key: 's4',
     title: 'Try to break it',
-    prompt: 'A result you cannot break is worth more than one you have not tested. Run the ' +
-            'placebo tests, move the intervention year to a date before 2011, and drop ' +
-            'donor countries one at a time.',
-    ask: 'Which test put the most pressure on the result? Did the finding survive?'
+    prompt: 'Run the placebo tests across countries and across dates, and drop donor ' +
+            'countries one at a time.',
+    ask: 'Which test put the most pressure on the result? Name the number that moved ' +
+         'and say whether the finding survived.'
   },
   {
     key: 's5',
-    title: 'State your conclusion',
-    prompt: 'Write the claim you are willing to defend to the rest of the class, with the ' +
-            'evidence behind it and the caveat you would attach to it.',
-    ask: 'Did the nuclear phase-out raise CO₂ emissions from fossil fuels? State your ' +
-         'conclusion, your evidence, and your main caveat.'
+    title: 'Did it replicate?',
+    prompt: 'Go through the published numbers one at a time and mark each as matched, ' +
+            'close, or did not reproduce.',
+    ask: 'Did the study replicate? Go through the checklist, say which numbers matched ' +
+         'and which did not, and state the conclusion you are willing to defend.'
   }
 ];
 
@@ -321,8 +323,23 @@ function publicRoom(room, forClient) {
     return { seatId: sid, name: s.name, online: s.online, color: s.color };
   });
   const isMine = forClient.roomId === room.id;
-  const canSeeAnswers = forClient.role === 'facilitator' || isMine ||
-                        state.classroom.revealCrossRoom;
+  const isFac = forClient.role === 'facilitator';
+  const canSeeAnswers = isFac || isMine || state.classroom.revealCrossRoom;
+
+  // A student sees only their own room's work. Other rooms are a name and a
+  // head count on the picker -- nothing about what those groups are doing.
+  if (!isFac && !isMine) {
+    return {
+      id: room.id,
+      seats: seats.map(q => ({ name: q.name, online: q.online, color: q.color })),
+      occupancy: roomOccupancy(room),
+      capacity: ROOM_CAPACITY,
+      frozen: !!state.classroom.frozenRooms[room.id],
+      answersVisible: false,
+      restricted: true
+    };
+  }
+
   const out = {
     id: room.id,
     stage: room.stage,
@@ -435,7 +452,9 @@ function handleJoin(client, msg) {
   }
   // Free seats that have been abandoned past the timeout
   sweepSeats();
-  if (roomOccupancy(room) >= ROOM_CAPACITY) return deny(client, 'join', 'room-full');
+  if (ROOM_CAPACITY > 0 && roomOccupancy(room) >= ROOM_CAPACITY) {
+    return deny(client, 'join', 'room-full');
+  }
 
   const seatId = 'seat' + crypto.randomBytes(4).toString('hex');
   const seat = {
@@ -868,15 +887,36 @@ const MIME = {
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.csv': 'text/csv; charset=utf-8'
 };
 
-function serveFile(res, file, status) {
+/* Compressed and cached in memory. The page is ~190 KB of text, which matters
+   a great deal when the server is on another continent from the classroom. */
+const fileCache = new Map();
+
+function serveFile(res, file, status, req) {
+  const hit = fileCache.get(file);
+  if (hit) return sendFile(res, file, hit, status, req);
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not found'); }
-    res.writeHead(status || 200, {
-      'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-      'Cache-Control': 'no-cache'
-    });
-    res.end(buf);
+    const ext = path.extname(file).toLowerCase();
+    const entry = { raw: buf, gz: null, type: MIME[ext] || 'application/octet-stream' };
+    if (/\.(html|js|css|json|csv|svg)$/.test(ext) && buf.length > 1024) {
+      try { entry.gz = zlib.gzipSync(buf, { level: 8 }); } catch (e) { /* serve raw */ }
+    }
+    fileCache.set(file, entry);
+    sendFile(res, file, entry, status, req);
   });
+}
+
+function sendFile(res, file, entry, status, req) {
+  const accepts = String((req && req.headers['accept-encoding']) || '');
+  const useGz = entry.gz && /\bgzip\b/.test(accepts);
+  const head = {
+    'Content-Type': entry.type,
+    'Cache-Control': 'no-cache',
+    'Vary': 'Accept-Encoding'
+  };
+  if (useGz) head['Content-Encoding'] = 'gzip';
+  res.writeHead(status || 200, head);
+  res.end(useGz ? entry.gz : entry.raw);
 }
 
 /* ------------------------------------------------- HTTP polling fallback
@@ -1017,9 +1057,9 @@ const server = http.createServer((req, res) => {
     });
     return res.end(JSON.stringify(buildExport(), null, 2));
   }
-  if (p === '/' || p === '/index.html') return serveFile(res, path.join(__dirname, 'index.html'));
+  if (p === '/' || p === '/index.html') return serveFile(res, path.join(__dirname, 'index.html'), 200, req);
   if (p === '/facilitator' || p === '/facilitator.html') {
-    return serveFile(res, path.join(__dirname, 'facilitator.html'));
+    return serveFile(res, path.join(__dirname, 'facilitator.html'), 200, req);
   }
 
   // Static assets, constrained to this directory
@@ -1029,7 +1069,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('Forbidden');
   }
-  serveFile(res, file);
+  serveFile(res, file, 200, req);
 });
 
 ws.attach(server, (conn) => {

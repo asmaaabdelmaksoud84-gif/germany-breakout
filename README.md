@@ -38,7 +38,8 @@ FACILITATOR_KEY=myclass2026 node server.js
 | `PORT` | `3000` | Port to listen on. Most hosts set this for you. |
 | `HOST` | `0.0.0.0` | Interface to bind. |
 | `FACILITATOR_KEY` | random each start | Password for the facilitator dashboard. |
-| `ROOM_CAPACITY` | `4` | Students per breakout room. |
+| `ROOM_COUNT` | `10` | How many breakout rooms exist. |
+| `ROOM_CAPACITY` | `0` | Students per room. `0` means no limit, so the whole class can pile into one room for a demonstration. |
 | `SEAT_TIMEOUT_MS` | `120000` | How long a disconnected student keeps their seat. |
 | `STATE_FILE` | `./classroom-state.json` | Where work is saved between restarts. |
 

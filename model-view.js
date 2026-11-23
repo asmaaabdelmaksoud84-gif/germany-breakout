@@ -76,7 +76,7 @@
       var tot = w.reduce(function (a, b) { return a + b; }, 0);
       if (tot > 0) w = w.map(function (x) { return x / tot; });
     } else if (model.weightMode === 'optimised') {
-      var fit = SCM.optimiseV(bundle, design, { samples: 420, refine: 5, maxIter: 520 });
+      var fit = SCM.optimiseV(bundle, design);
       w = Array.from(fit.w); v = Array.from(fit.v);
       source = 'optimised';
     } else {
@@ -159,10 +159,45 @@
     };
   }
 
+  /** Has this model already been solved? Lets the UI paint before blocking. */
+  function isCached(model) { return CACHE.has(modelKey(model)); }
+
   /* ------------------------------------------- lazily computed robustness */
 
   var HEAVY = new Map();
   function heavyKey(kind, model) { return kind + '|' + modelKey(model); }
+
+  /**
+   * The predictor importances to carry into the robustness tests: whatever the
+   * student is using. The published model fixes country weights directly and
+   * has no V of its own, so one is derived once and cached.
+   */
+  function sharedV(bundle, model) {
+    var view = compute(bundle, model);
+    if (view.v && view.v.length === view.design.S) return view.v;
+    var k = heavyKey('sv', model);
+    if (HEAVY.has(k)) return HEAVY.get(k);
+    var fit = SCM.optimiseV(bundle, view.design);
+    HEAVY.set(k, fit.v);
+    return fit.v;
+  }
+
+  /** Re-express a V as label -> weight, so it survives a change of design. */
+  function vAsLabels(design, v) {
+    var m = {};
+    for (var i = 0; i < design.labels.length; i++) m[design.labels[i]] = v[i];
+    return m;
+  }
+  function vForDesign(design, map) {
+    var out = new Array(design.S), tot = 0, i;
+    for (i = 0; i < design.S; i++) {
+      var x = map[design.labels[i]];
+      out[i] = (x === undefined || !isFinite(x)) ? 0 : x;
+      tot += out[i];
+    }
+    if (!(tot > 0)) for (i = 0; i < design.S; i++) out[i] = 1 / design.S;
+    return out;
+  }
 
   function placeboSpace(bundle, model, done) {
     var k = heavyKey('ps', model);
@@ -171,7 +206,7 @@
       var res = SCM.placeboInSpace(bundle, {
         t0: model.t0, donors: model.donors,
         meanPredictors: model.predictors, lagYears: model.lagYears
-      });
+      }, sharedV(bundle, model));
       HEAVY.set(k, res); done(res);
     }, 10);
   }
@@ -180,8 +215,12 @@
     var k = heavyKey('pt' + fakeYears.join(','), model);
     if (HEAVY.has(k)) return done(HEAVY.get(k));
     setTimeout(function () {
+      var base = compute(bundle, model);
+      var map = vAsLabels(base.design, sharedV(bundle, model));
       var res = fakeYears.map(function (fy) {
-        var m2 = Object.assign({}, model, { t0: fy, weightMode: 'optimised' });
+        // Same specification, earlier date -- so the only thing that changed
+        // is the intervention year, which is the point of the test.
+        var m2 = Object.assign({}, model, { t0: fy, weightMode: 'manual', v: map });
         var vw = compute(bundle, m2);
         return {
           year: fy, observed: vw.observed, synthetic: vw.synthetic,
@@ -199,7 +238,7 @@
       var res = SCM.leaveOneOut(bundle, {
         t0: model.t0, donors: model.donors,
         meanPredictors: model.predictors, lagYears: model.lagYears
-      });
+      }, sharedV(bundle, model));
       var out = res.map(function (r) {
         var obs = Array.from(SCM.treatedPath(bundle, r.design));
         var syn = Array.from(r.path);
@@ -216,7 +255,7 @@
 
   root.ModelView = {
     compute: compute, gapFor: gapFor, pathsFor: pathsFor, labelOf: labelOf,
-    vFor: vFor, modelKey: modelKey,
+    vFor: vFor, modelKey: modelKey, isCached: isCached, sharedV: sharedV,
     placeboSpace: placeboSpace, placeboTime: placeboTime, leaveOneOut: leaveOneOut,
     PRED_LABELS: PRED_LABELS, SERIES_LABELS: SERIES_LABELS
   };

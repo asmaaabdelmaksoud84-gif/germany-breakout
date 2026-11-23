@@ -340,9 +340,11 @@
    */
   function optimiseV(bundle, design, opts) {
     opts = opts || {};
-    var samples = opts.samples === undefined ? 600 : opts.samples;
-    var refine = opts.refine === undefined ? 6 : opts.refine;
-    var maxIter = opts.maxIter || 700;
+    // Measured: 140/3/300 reaches the same optimum as 420/5/520 in a third
+    // of the time. Going lower starts to cost fit quality.
+    var samples = opts.samples === undefined ? 140 : opts.samples;
+    var refine = opts.refine === undefined ? 3 : opts.refine;
+    var maxIter = opts.maxIter || 300;
     var S = design.S;
     var seed = (opts.seed || 12345) >>> 0;
     function rnd() {   // deterministic LCG, so every client agrees
@@ -396,18 +398,28 @@
 
   /* ------------------------------------------------------- robustness tools */
 
-  /** Placebo in space: treat each donor as if it had been treated. */
-  function placeboInSpace(bundle, baseOpts) {
+  /**
+   * Placebo in space: treat each donor as if it had been treated.
+   *
+   * ONE specification is applied to every country -- the same predictor
+   * importances the student chose -- rather than re-optimising for each. That
+   * is the question a placebo test actually asks ("does the treated unit stand
+   * out under this model?"), and re-optimising per country lets each one pick
+   * weights that flatter its own pre-period fit, which inflates its ratio.
+   * It is also about a thousand times faster, so the view opens instantly.
+   */
+  function placeboInSpace(bundle, baseOpts, v) {
     var pool = (baseOpts.donors || bundle.donors).slice();
     var all = [bundle.treated].concat(pool);
     var out = [];
     for (var i = 0; i < all.length; i++) {
       var unit = all[i];
       var others = all.filter(function (u) { return u !== unit; });
-      var o = Object.assign({}, baseOpts, { treated: unit, donors: others });
-      var d = buildDesign(bundle, o);
-      var fit = optimiseV(bundle, d, { samples: 260, refine: 3, maxIter: 340 });
-      var st = fitStats(bundle, d, fit.w);
+      var d = buildDesign(bundle, Object.assign({}, baseOpts,
+                                                { treated: unit, donors: others }));
+      var vv = (v && v.length === d.S) ? v : null;
+      var w = vv ? solveW(d, vv) : optimiseV(bundle, d).w;
+      var st = fitStats(bundle, d, w);
       out.push({
         unit: unit, ratio: st.ratio,
         rmspePre: st.rmspePre, rmspePost: st.rmspePost
@@ -427,7 +439,7 @@
       var d = buildDesign(bundle, Object.assign({}, baseOpts, { donors: others }));
       var w;
       if (v && v.length === d.S) w = solveW(d, v);
-      else w = optimiseV(bundle, d, { samples: 260, refine: 3, maxIter: 340 }).w;
+      else w = optimiseV(bundle, d).w;
       out.push({
         dropped: dropped, design: d, w: w,
         path: syntheticPath(bundle, d, w),

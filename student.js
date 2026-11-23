@@ -1,27 +1,25 @@
 /* Student client: room selection, the shared investigation, private
- * exploration, group answers, and the classroom overview. */
+ * exploration, group answers, and the glossary. A student never sees another
+ * room's work -- the room list shows only names and a head count. */
 (function () {
   'use strict';
   var C = Charts, MV = ModelView;
 
+  /* Each stage offers only the controls it needs. */
+  var STAGE_CONTROLS = {
+    s1: { views: ['levels'], show: [] },
+    s2: { views: ['levels', 'gap'], show: ['weights', 'predictors'] },
+    s3: { views: ['levels', 'gap', 'fuels', 'electricity'], show: [] },
+    s4: { views: ['gap', 'placeboSpace', 'placeboTime', 'loo'], show: ['dropDonor', 't0'] },
+    s5: { views: ['levels', 'gap'], show: [] }
+  };
+
   var App = {
     bundle: null, net: null, st: null, panel: null,
-    ack: {}, inflight: {}, dirty: {}, overviewOpen: false, lastDenied: null
+    ack: {}, inflight: {}, dirty: {}
   };
 
   function $(sel) { return document.querySelector(sel); }
-
-  /* Re-render a region only when its contents would actually differ. State
-     broadcasts arrive whenever anyone in any room changes anything, and
-     rebuilding a region replaces its buttons -- a click landing in that gap
-     would hit a detached node. Guarding on a signature keeps controls stable. */
-  var SIGS = {};
-  function ifChanged(key, sig, fn) {
-    if (SIGS[key] === sig) return false;
-    SIGS[key] = sig;
-    fn();
-    return true;
-  }
   function el(tag, cls, html) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -29,9 +27,23 @@
     return e;
   }
 
+  var SIGS = {};
+  function ifChanged(key, sig, fn) {
+    if (SIGS[key] === sig) return false;
+    SIGS[key] = sig;
+    fn();
+    return true;
+  }
+
   /* ------------------------------------------------------------------ boot */
 
   function boot() {
+    try {
+      if (localStorage.getItem('scm-large-text') === '1') {
+        document.documentElement.classList.add('large-text');
+      }
+    } catch (e) { /* private browsing */ }
+
     fetch('data_bundle.json').then(function (r) { return r.json(); }).then(function (b) {
       App.bundle = b;
       App.net = new Net({ storeKey: 'scm-classroom-seat' });
@@ -41,7 +53,8 @@
       App.net.on('answerAck', onAnswerAck);
       App.net.on('displaced', function () {
         App.st = null;
-        toast('You opened this activity in another tab, so this one has left the room.', 'warn', 8000);
+        toast('You opened this activity in another tab, so this one has left the room.',
+              'warn', 8000);
       });
       App.net.connect();
       setInterval(function () { App.net.send({ type: 'ping' }); }, 20000);
@@ -55,30 +68,27 @@
     var c = $('#conn');
     if (c) {
       c.className = 'conn' + (up ? '' : ' down');
-      c.innerHTML = '<span class="dot"></span>' + (up ? 'Live' : 'Reconnecting…');
+      c.innerHTML = '<span class="dot"></span>' + (up ? '' : 'Reconnecting…');
     }
   }
 
   function onDenied(msg) {
     var why = {
-      'frozen-all': 'The facilitator has paused every room.',
-      'frozen-room': 'The facilitator has paused your room.',
-      'presenting': 'The facilitator is presenting to the whole class.',
-      'room-full': 'That room already has four students.',
+      'frozen-all': 'Your facilitator has paused every room.',
+      'frozen-room': 'Your facilitator has paused your room.',
+      'presenting': 'Your facilitator is presenting to the whole class.',
       'name-required': 'Please enter a name.',
       'not-in-room': 'Join a room first.',
       'too-long': 'That answer is at its maximum length.'
     }[msg.reason] || ('That action was refused (' + msg.reason + ').');
-    toast(why, msg.reason === 'room-full' ? 'warn' : 'info', 4500);
-    if (msg.reason === 'room-full') render();
+    toast(why, 'info', 4000);
   }
 
   var toastTimer = null;
   function toast(text, kind, ms) {
     var host = $('#toast');
     host.innerHTML = '<div class="notice ' + (kind || 'info') + '"><span class="ic">' +
-      (kind === 'warn' ? '!' : kind === 'bad' ? '!' : 'i') + '</span><div>' +
-      C.esc(text) + '</div></div>';
+      (kind === 'warn' ? '!' : 'i') + '</span><div>' + C.esc(text) + '</div></div>';
     host.style.display = '';
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { host.style.display = 'none'; }, ms || 4000);
@@ -88,9 +98,7 @@
     var wasIn = App.st && App.st.you.roomId;
     App.st = s;
     render();
-    if (!wasIn && s.you.roomId) syncAnswersFromServer(true);
-    else syncAnswersFromServer(false);
-    if (App.overviewOpen) renderOverview();
+    syncAnswersFromServer(!wasIn && !!s.you.roomId);
   }
 
   /* -------------------------------------------------------- mode reasoning */
@@ -109,7 +117,6 @@
     var m = modeOf();
     return m.key === 'frozen' || m.key === 'present';
   }
-  /** Which model this student is looking at right now. */
   function activeModel() {
     var s = App.st, m = modeOf();
     if (m.key === 'present' && s.classroom.presentModel) return s.classroom.presentModel;
@@ -131,68 +138,75 @@
   function renderLobby() {
     var s = App.st, b = App.bundle;
     var root = $('#app');
+    var intro = CONTENT.INTRO;
     root.innerHTML = '';
     var wrap = el('div', 'wrap-narrow');
 
-    wrap.appendChild(el('h1', null,
-      "Did Germany's Nuclear Phase-Out Increase CO₂ Emissions?"));
-    wrap.appendChild(el('p', 'secondary',
-      'A synthetic-control investigation using the published panel of twelve European ' +
-      'countries, 1990–2023.'));
-
-    var head = el('div');
-    head.style.margin = '30px 0 4px';
-    head.appendChild(el('h2', null, 'Pick your breakout room'));
+    var head = el('div', 'lobby-head');
+    head.appendChild(el('h1', 'serif', C.esc(intro.title)));
+    head.appendChild(el('p', 'secondary', C.esc(intro.subtitle)));
     wrap.appendChild(head);
-    wrap.appendChild(el('p', 'muted', 'Choose the room your facilitator assigned you.'));
+
+    var about = el('div', 'card pad about');
+    intro.blocks.slice(0, 2).forEach(function (bk) {
+      about.appendChild(el('p', null, '<strong>' + C.esc(bk.lead) + '</strong> ' + C.esc(bk.text)));
+    });
+    wrap.appendChild(about);
+
+    var pick = el('div');
+    pick.style.marginTop = '28px';
+    pick.appendChild(el('h2', null, 'Pick your breakout room'));
+    pick.appendChild(el('p', 'muted', 'Choose the room your facilitator assigned you.'));
+    wrap.appendChild(pick);
 
     var grid = el('div', 'room-grid');
-    grid.style.marginTop = '18px';
+    grid.style.marginTop = '16px';
     s.config.roomIds.forEach(function (id) {
       var r = s.rooms[id];
-      var full = r.occupancy >= r.capacity;
       var card = el('button', 'room-card');
       card.type = 'button';
-      card.disabled = full;
-
-      var occText = r.occupancy === 0 ? 'Empty'
-        : full ? 'Full — ' + r.occupancy + '/' + r.capacity + ' students'
-        : r.occupancy + '/' + r.capacity + ' students';
-      var occCls = r.occupancy === 0 ? 'empty' : full ? 'full' : '';
-
       card.appendChild(el('div', 'rc-name', 'Room ' + id));
-      card.appendChild(el('div', 'rc-occ ' + occCls, occText));
 
-      var pips = el('div', 'seat-pips');
-      for (var i = 0; i < r.capacity; i++) {
-        pips.appendChild(el('span', 'seat-pip' + (i < r.occupancy ? ' on' : '')));
-      }
-      card.appendChild(pips);
+      var n = r.occupancy;
+      var occ = el('div', 'rc-occ' + (n === 0 ? ' empty' : ''),
+                   n === 0 ? 'Empty' : n + (n === 1 ? ' person here' : ' people here'));
+      card.appendChild(occ);
 
       var who = el('div', 'who');
-      if (r.seats.length) {
-        r.seats.forEach(function (st) {
+      if (r.seats && r.seats.length) {
+        r.seats.slice(0, 8).forEach(function (st) {
           var row = el('div', 'who-row');
-          row.appendChild(el('span', 'who-dot' + (st.online ? '' : ' off'))).style.background = st.color;
-          row.appendChild(el('span', st.online ? '' : 'muted', C.esc(st.name) +
-            (st.online ? '' : ' (away)')));
+          var dot = el('span', 'who-dot' + (st.online ? '' : ' off'));
+          dot.style.background = st.color;
+          row.appendChild(dot);
+          row.appendChild(el('span', st.online ? '' : 'muted',
+            C.esc(st.name) + (st.online ? '' : ' (away)')));
           who.appendChild(row);
         });
+        if (r.seats.length > 8) {
+          who.appendChild(el('div', 'who-row muted', '+' + (r.seats.length - 8) + ' more'));
+        }
       } else {
         who.appendChild(el('div', 'who-row muted', 'No one here yet'));
       }
       card.appendChild(who);
-
-      if (!full) card.addEventListener('click', function () { askName(id); });
+      card.addEventListener('click', function () { askName(id); });
       grid.appendChild(card);
     });
     wrap.appendChild(grid);
 
     var foot = el('div', 'small muted');
     foot.style.marginTop = '26px';
-    foot.innerHTML = 'Each room holds four students and has its own shared workspace. ' +
-      'Everything you change inside a room is visible to your group straight away.';
+    foot.innerHTML = 'Everything you change inside a room is shared with the people in ' +
+      'that room, and with nobody else. You can move to a different room at any time.';
     wrap.appendChild(foot);
+
+    var fac = el('div', 'tiny muted');
+    fac.style.marginTop = '10px';
+    fac.innerHTML = '<a href="facilitator" target="_blank" rel="noopener">' +
+      'Facilitator? Open the dashboard</a>';
+    wrap.appendChild(fac);
+
     root.appendChild(wrap);
   }
 
@@ -249,42 +263,68 @@
     var locked = isLocked();
     var root = $('#app');
 
-    // Build the shell once, then update in place
-    if (!App.shellFor || App.shellFor !== s.you.roomId) {
+    if (App.shellFor !== s.you.roomId) {
       root.innerHTML = '';
       App.shellFor = s.you.roomId;
       App.panel = null;
       SIGS = {};
 
-      App.modeBar = el('div', 'mode-bar');
-      root.appendChild(App.modeBar);
+      App.freezeBar = el('div', 'freeze-bar');
+      root.appendChild(App.freezeBar);
+      App.roomBar = el('div', 'room-bar');
+      root.appendChild(App.roomBar);
 
       var wrap = el('div', 'wrap');
+
+      var head = el('div', 'act-head');
+      var ht = el('div');
+      ht.appendChild(el('h1', 'serif', C.esc(CONTENT.INTRO.title)));
+      ht.appendChild(el('p', 'secondary', C.esc(CONTENT.INTRO.subtitle)));
+      head.appendChild(ht);
+      var tools = el('div', 'row-wrap');
+      var gloss = el('button', 'always', 'What do these words mean?');
+      gloss.type = 'button';
+      gloss.addEventListener('click', openGlossary);
+      tools.appendChild(gloss);
+      var bigger = el('button', 'ghost always', 'Larger text');
+      bigger.type = 'button';
+      bigger.addEventListener('click', function () {
+        var on = document.documentElement.classList.toggle('large-text');
+        try { localStorage.setItem('scm-large-text', on ? '1' : '0'); } catch (e) {}
+      });
+      tools.appendChild(bigger);
+      head.appendChild(tools);
+      wrap.appendChild(head);
+
+      App.introHost = el('div');
+      wrap.appendChild(App.introHost);
+
+      App.stageNav = el('div', 'stage-nav');
+      wrap.appendChild(App.stageNav);
+
       App.noticeHost = el('div');
-      App.noticeHost.style.marginBottom = '14px';
+      App.noticeHost.style.margin = '12px 0';
       wrap.appendChild(App.noticeHost);
 
-      App.stageHost = el('div', 'card pad');
-      App.stageHost.style.marginBottom = '16px';
-      wrap.appendChild(App.stageHost);
-
-      App.panelHost = el('div', 'readonly-veil');
-      wrap.appendChild(App.panelHost);
-
-      App.answerHost = el('div', 'card pad readonly-veil');
-      App.answerHost.style.marginTop = '16px';
-      wrap.appendChild(App.answerHost);
-
-      App.activityHost = el('div', 'small muted');
-      App.activityHost.style.marginTop = '14px';
-      wrap.appendChild(App.activityHost);
+      var cols = el('div', 'cols');
+      App.panelHost = el('div', 'readonly-veil stack');
+      cols.appendChild(App.panelHost);
+      App.sideHost = el('div', 'stack');
+      cols.appendChild(App.sideHost);
+      wrap.appendChild(cols);
 
       root.appendChild(wrap);
+      renderIntroCard();
     }
 
-    renderModeBar(mode, room);
+    renderFreezeBar(mode);
+    renderRoomBar(mode, room);
+    renderStageNav(room, mode, locked);
     renderNotices(mode, room);
-    renderStageHeader(room, mode, locked);
+
+    var showStage = mode.key === 'present' ? s.classroom.presentStage : room.stage;
+    var stage = s.stages[showStage];
+    var controls = STAGE_CONTROLS[stage.key] || { views: ['levels'], show: [] };
 
     if (!App.panel) {
       App.panel = new Panel(App.panelHost, {
@@ -296,76 +336,111 @@
         }
       });
     }
-    App.panel.update({ model: activeModel(), locked: locked });
+    var model = activeModel();
+    // Keep the view inside what this stage offers
+    if (controls.views.indexOf(model.view) < 0) {
+      model = Object.assign({}, model, { view: controls.views[0] });
+    }
+    App.panel.update({
+      model: model, locked: locked, controls: controls, stageKey: stage.key
+    });
     App.panelHost.dataset.locked = locked ? '1' : '0';
 
-    renderAnswer(room, locked, mode);
-    renderActivity(room);
+    renderSide(room, stage, showStage, locked, mode);
   }
 
-  function renderModeBar(mode, room) {
-    var s = App.st;
-    var priv0 = s.myPrivate || {};
-    var sig = [mode.key, mode.scope || '', s.you.roomId, App.net.connected,
-               priv0.active, priv0.suspended, isLocked(),
-               room.seats.map(function (q) {
-                 return q.seatId + ':' + q.name + ':' + q.online;
-               }).join(',')].join('|');
-    if (SIGS.modeBar === sig) return;
-    SIGS.modeBar = sig;
-    var cls = { group: 'mode-group', private: 'mode-private', frozen: 'mode-frozen',
-                present: 'mode-present' }[mode.key] || 'mode-group';
-    App.modeBar.className = 'mode-bar ' + cls;
-    var title = {
-      group: 'Group Mode — Room ' + s.you.roomId,
-      private: 'Exploring on your own',
-      frozen: 'Paused by your facilitator',
-      present: 'Facilitator is presenting'
-    }[mode.key];
-    var sub = {
-      group: 'Changes you make are shared with your group',
-      private: 'Your changes are private and will not affect your group',
-      frozen: 'You can look, but you cannot change anything until the session resumes',
-      present: 'You are watching the facilitator\'s screen'
-    }[mode.key];
-
-    App.modeBar.innerHTML = '';
-    var what = el('div', 'what');
-    what.appendChild(el('span', 'mode-dot'));
-    var txt = el('div');
-    txt.appendChild(el('div', null, C.esc(title)));
-    txt.appendChild(el('div', 'tiny', C.esc(sub)));
-    txt.children[0].style.lineHeight = '1.2';
-    what.appendChild(txt);
-    App.modeBar.appendChild(what);
-
-    var right = el('div', 'row-wrap');
-
-    // Who is here
-    var people = el('div', 'row-wrap');
-    people.style.gap = '8px';
-    room.seats.forEach(function (st) {
-      var tag = el('span', 'legend-item');
-      var dot = el('span', 'who-dot' + (st.online ? '' : ' off'));
-      dot.style.background = st.color;
-      tag.appendChild(dot);
-      tag.appendChild(document.createTextNode(st.name +
-        (st.seatId === App.st.you.seatId ? ' (you)' : '')));
-      people.appendChild(tag);
+  function renderIntroCard() {
+    var intro = CONTENT.INTRO;
+    var d = el('details', 'card pad about-card');
+    var sm = document.createElement('summary');
+    sm.innerHTML = '<strong>About this activity</strong> — what you are doing and how the room works';
+    d.appendChild(sm);
+    intro.blocks.forEach(function (bk) {
+      d.appendChild(el('p', null, '<strong>' + C.esc(bk.lead) + '</strong> ' + C.esc(bk.text)));
     });
-    right.appendChild(people);
-    right.appendChild(el('div', null, '<span class="sep" style="display:inline-block;width:1px;height:20px;background:var(--border-strong)"></span>'));
+    try { d.open = localStorage.getItem('scm-intro-seen') !== '1'; } catch (e) { d.open = true; }
+    d.addEventListener('toggle', function () {
+      if (!d.open) { try { localStorage.setItem('scm-intro-seen', '1'); } catch (e) {} }
+    });
+    App.introHost.appendChild(d);
+  }
 
-    // Private mode toggle
-    var priv = App.st.myPrivate;
+  function renderFreezeBar(mode) {
+    var txt = mode.key === 'frozen'
+      ? 'Paused by your facilitator. You can look, but you cannot change anything until ' +
+        'the session resumes.'
+      : mode.key === 'present'
+        ? 'Your facilitator is presenting. Everyone is seeing the same analysis; your ' +
+          'group’s own work is saved and comes back afterwards.'
+        : '';
+    ifChanged('freeze', txt, function () {
+      App.freezeBar.textContent = txt;
+      App.freezeBar.style.display = txt ? '' : 'none';
+      App.freezeBar.className = 'freeze-bar' + (mode.key === 'present' ? ' presenting' : '');
+    });
+  }
+
+  function renderRoomBar(mode, room) {
+    var s = App.st;
+    var priv = s.myPrivate || {};
+    var sig = [mode.key, s.you.roomId, room.occupancy, priv.active, priv.suspended,
+               isLocked(), App.net.connected,
+               room.seats.map(function (q) { return q.seatId + q.name + q.online; }).join(',')
+              ].join('|');
+    if (SIGS.roomBar === sig) return;
+    SIGS.roomBar = sig;
+
+    App.roomBar.innerHTML = '';
+    var left = el('div', 'rb-left');
+    left.appendChild(el('span', 'live-dot'));
+    left.appendChild(el('strong', null, 'Room ' + s.you.roomId));
+    var n = room.occupancy;
+    left.appendChild(el('span', 'muted small',
+      n + (n === 1 ? ' here' : ' here')));
+
+    room.seats.forEach(function (q) {
+      var chip = el('span', 'person-chip' + (q.online ? '' : ' off'));
+      var dot = el('span', 'who-dot');
+      dot.style.background = q.color;
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(
+        q.name + (q.seatId === s.you.seatId ? ' (you)' : '')));
+      if (q.seatId === s.you.seatId && mode.key === 'private') {
+        chip.appendChild(el('em', 'tiny', ' (exploring on their own)'));
+      }
+      left.appendChild(chip);
+    });
+    App.roomBar.appendChild(left);
+
+    var right = el('div', 'rb-right');
+    if (mode.key === 'private') {
+      right.appendChild(el('span', 'explore-note',
+        'You’re exploring on your own: your group can’t see your changes, and ' +
+        'they won’t be kept when you rejoin.'));
+    }
+
+    var changeRoom = el('button', 'linkish always', 'Change room');
+    changeRoom.type = 'button';
+    changeRoom.addEventListener('click', function () {
+      if (confirm('Leave Room ' + s.you.roomId + ' and pick a different one?\n\n' +
+                  'Your group keeps its work.')) {
+        App.net.send({ type: 'leave' });
+      }
+    });
+    right.appendChild(changeRoom);
+
+    var facLink = el('a', 'linkish', 'Facilitator?');
+    facLink.href = 'facilitator';
+    facLink.target = '_blank';
+    facLink.rel = 'noopener';
+    right.appendChild(facLink);
+
     if (mode.key === 'private') {
       var rejoin = el('button', 'primary always', 'Rejoin the group');
       rejoin.type = 'button';
-      rejoin.addEventListener('click', function () {
-        App.net.send({ type: 'privateStop' });
-      });
+      rejoin.addEventListener('click', function () { App.net.send({ type: 'privateStop' }); });
       right.appendChild(rejoin);
-      var prop = el('button', 'sm', 'Propose this to my group');
+      var prop = el('button', 'sm', 'Propose to my group');
       prop.type = 'button';
       prop.disabled = isLocked();
       prop.addEventListener('click', proposeToGroup);
@@ -373,68 +448,54 @@
     } else {
       var go = el('button', 'always', 'Explore on your own');
       go.type = 'button';
-      go.addEventListener('click', function () {
-        App.net.send({ type: 'privateStart' });
-      });
+      go.addEventListener('click', function () { App.net.send({ type: 'privateStart' }); });
       right.appendChild(go);
     }
 
-    var ov = el('button', 'ghost always', 'Classroom Overview');
-    ov.type = 'button';
-    ov.addEventListener('click', openOverview);
-    right.appendChild(ov);
-
     var conn = el('span', 'conn');
     conn.id = 'conn';
-    conn.innerHTML = '<span class="dot"></span>' + (App.net.connected ? 'Live' : 'Reconnecting…');
+    conn.innerHTML = '<span class="dot"></span>' + (App.net.connected ? '' : 'Reconnecting…');
     if (!App.net.connected) conn.className = 'conn down';
     right.appendChild(conn);
 
-    var leave = el('button', 'ghost sm always', 'Leave');
-    leave.type = 'button';
-    leave.addEventListener('click', function () {
-      if (confirm('Leave the room? Your group keeps its work, and your seat is freed.')) {
-        App.net.send({ type: 'leave' });
-      }
-    });
-    right.appendChild(leave);
+    App.roomBar.appendChild(right);
+  }
 
-    App.modeBar.appendChild(right);
+  function renderStageNav(room, mode, locked) {
+    var s = App.st;
+    var showStage = mode.key === 'present' ? s.classroom.presentStage : room.stage;
+    if (SIGS.stageNav === showStage + '|' + locked) return;
+    SIGS.stageNav = showStage + '|' + locked;
+    App.stageNav.innerHTML = '';
+    s.stages.forEach(function (st, i) {
+      var btn = el('button', 'stage-pill' + (i === showStage ? ' on' : ''));
+      btn.type = 'button';
+      btn.textContent = (i + 1) + ' ' + st.title;
+      btn.disabled = locked;
+      btn.addEventListener('click', function () {
+        App.net.send({ type: 'setStage', stage: i });
+      });
+      App.stageNav.appendChild(btn);
+    });
   }
 
   function renderNotices(mode, room) {
     var s = App.st, h = '';
-    var sigN = [mode.key, mode.scope || '',
-                (s.myPrivate && s.myPrivate.active) + ':' + (s.myPrivate && s.myPrivate.suspended),
-                (room.proposals || []).map(function (p) { return p.id; }).join(',')].join('|');
-    if (SIGS.notices === sigN) return;
-    SIGS.notices = sigN;
-    if (mode.key === 'frozen') {
-      h += '<div class="notice warn"><span class="ic">⏸</span><div><strong>Paused by your ' +
-        'facilitator.</strong> You can look, but you cannot change anything until the ' +
-        'session resumes.' +
-        (mode.scope === 'room' ? ' Only your room is paused.' : '') + '</div></div>';
-    }
-    if (mode.key === 'present') {
-      h += '<div class="notice info"><span class="ic">▶</span><div><strong>The facilitator ' +
-        'is presenting.</strong> Everyone is seeing the same analysis. Your group\'s own ' +
-        'work is saved and comes back when the presentation ends.</div></div>';
-    }
-    if (mode.key === 'private') {
-      h += '<div class="notice info"><span class="ic">🔒</span><div><strong>You\'re exploring ' +
-        'on your own.</strong> Your changes are private and won\'t affect your group\'s ' +
-        'results. Use <em>Rejoin the group</em> to go back.</div></div>';
-    }
+    var sig = [mode.key, (s.myPrivate && s.myPrivate.suspended),
+               (room.proposals || []).map(function (p) { return p.id; }).join(',')].join('|');
+    if (SIGS.notices === sig) return;
+    SIGS.notices = sig;
+
     if (s.myPrivate && s.myPrivate.active && s.myPrivate.suspended && mode.key !== 'private') {
-      h += '<div class="notice warn"><span class="ic">⏸</span><div>Your private workspace is ' +
-        'paused while the facilitator has the floor. It will come back as you left it.</div></div>';
+      h += '<div class="notice warn"><span class="ic">⏸</span><div>Your private ' +
+        'workspace is paused while the facilitator has the floor. It will come back as ' +
+        'you left it.</div></div>';
     }
-    // Proposals waiting for the group
     (room.proposals || []).forEach(function (p) {
       var mine = p.from === s.you.seatId;
-      h += '<div class="notice info" data-prop="' + C.esc(p.id) + '"><span class="ic">💡</span>' +
-        '<div><strong>' + C.esc(p.fromName) + '</strong> proposes a model from their own ' +
-        'exploration. Applying it replaces the group\'s current settings.' +
+      h += '<div class="notice info"><span class="ic">▸</span><div><strong>' +
+        C.esc(p.fromName) + '</strong> proposes a model from their own exploration. ' +
+        'Applying it replaces your group’s current settings.' +
         (mine ? ' <span class="muted">(your proposal — someone else should accept it)</span>'
               : ' <button class="sm primary" data-accept="' + C.esc(p.id) + '">Apply to group</button>' +
                 ' <button class="sm ghost" data-reject="' + C.esc(p.id) + '">Dismiss</button>') +
@@ -453,85 +514,92 @@
     });
   }
 
-  function renderStageHeader(room, mode, locked) {
-    var s = App.st;
-    var showStage = mode.key === 'present' ? s.classroom.presentStage : room.stage;
-    if (SIGS.stageHead === showStage + '|' + locked) return;
-    SIGS.stageHead = showStage + '|' + locked;
-    var stage = s.stages[showStage];
-    App.stageHost.innerHTML = '';
-    var nav = el('div', 'stage-nav');
-    s.stages.forEach(function (st, i) {
-      var btn = el('button', 'stage-btn' + (i === showStage ? ' on' : '') +
-                   (i < showStage ? ' done' : ''));
-      btn.type = 'button';
-      btn.innerHTML = '<span class="n">' + (i + 1) + '</span>' + C.esc(st.title);
-      btn.disabled = locked;
-      btn.addEventListener('click', function () {
-        App.net.send({ type: 'setStage', stage: i });
+  /* ------------------------------------------ right column: prose + answer */
+
+  function renderSide(room, stage, showStage, locked, mode) {
+    var content = CONTENT.STAGE_CONTENT[stage.key];
+    if (SIGS.sideStage !== stage.key) {
+      SIGS.sideStage = stage.key;
+      App.sideHost.innerHTML = '';
+      var card = el('div', 'card pad prose');
+      card.appendChild(el('h2', null, C.esc(content.heading)));
+      content.blocks.forEach(function (bk) {
+        card.appendChild(el('p', null,
+          '<strong>' + C.esc(bk.lead) + '</strong> ' + C.esc(bk.text)));
       });
-      nav.appendChild(btn);
-    });
-    App.stageHost.appendChild(nav);
-    var body = el('div');
-    body.style.marginTop = '12px';
-    body.appendChild(el('h2', null, 'Stage ' + (showStage + 1) + ' · ' + C.esc(stage.title)));
-    body.appendChild(el('p', 'secondary', C.esc(stage.prompt)));
-    body.style.maxWidth = '76ch';
-    App.stageHost.appendChild(body);
+      App.sideHost.appendChild(card);
+
+      App.answerHost = el('div', 'card pad readonly-veil');
+      App.sideHost.appendChild(App.answerHost);
+      App.answerKey = null;
+      App.activityHost = el('div', 'tiny muted');
+      App.sideHost.appendChild(App.activityHost);
+    }
+    renderAnswer(room, stage, locked);
+    renderActivity(room);
   }
 
-  /* ------------------------------------------------------- group answers */
-
-  function renderAnswer(room, locked, mode) {
-    var s = App.st;
-    var showStage = mode.key === 'present' ? s.classroom.presentStage : room.stage;
-    var stage = s.stages[showStage];
+  function renderAnswer(room, stage, locked) {
     var key = stage.key;
     var doc = (room.answers && room.answers[key]) || { text: '', version: 0, lastEditor: null };
 
-    if (App.answerKey !== key || !App.ta) {
+    if (App.answerKey !== key) {
       App.answerKey = key;
       App.answerHost.innerHTML = '';
-      App.answerHost.appendChild(el('h4', null, 'Your group\'s answer'));
-      App.answerHost.appendChild(el('p', null, '<strong>' + C.esc(stage.ask) + '</strong>'));
+      App.answerHost.appendChild(el('h4', null, 'Your group’s answer'));
+      App.answerHost.appendChild(el('p', 'question', C.esc(stage.ask)));
       App.ta = document.createElement('textarea');
       App.ta.placeholder = 'Everyone in your room writes here. You will see each other type.';
       App.ta.value = doc.text;
       App.ta.addEventListener('input', onAnswerInput);
       App.answerHost.appendChild(App.ta);
-      App.answerMeta = el('div', 'spread small muted');
-      App.answerMeta.style.marginTop = '8px';
+      App.answerMeta = el('div', 'answer-meta');
       App.answerHost.appendChild(App.answerMeta);
       App.ack[key] = { text: doc.text, version: doc.version };
+      SIGS.answerMeta = null;
     }
 
     App.ta.disabled = locked;
     App.answerHost.dataset.locked = locked ? '1' : '0';
 
     var conf = (room.confidence && room.confidence[key]) || null;
-    var meta = '<div>' + (doc.lastEditor
-      ? 'Last edited by ' + C.esc(doc.lastEditor) +
-        ' · saved automatically · version ' + doc.version
-      : 'Saved automatically as you type') + '</div>';
-    meta += '<div class="row-wrap">How confident is your group?' +
-      [1, 2, 3, 4, 5].map(function (n) {
-        return '<button class="sm' + (conf && conf.value === n ? ' on' : '') +
-               '" data-conf="' + n + '"' + (locked ? ' disabled' : '') + '>' + n + '</button>';
-      }).join('') +
-      '<span class="tiny muted">1 = not at all, 5 = very</span></div>';
+    var meta = '<div class="small muted">' + (doc.lastEditor
+      ? 'Last edited by ' + C.esc(doc.lastEditor) + ' · saved automatically'
+      : 'Saved automatically as you type') + '</div>' +
+      '<div class="row-wrap small"><span class="muted">How sure are you?</span>' +
+      [[1, 'Guessing'], [3, 'Fairly sure'], [5, 'Sure']].map(function (p) {
+        return '<button class="opt sm' + (conf && conf.value === p[0] ? ' on' : '') +
+               '" data-conf="' + p[0] + '"' + (locked ? ' disabled' : '') + '>' + p[1] + '</button>';
+      }).join('') + '</div>';
     if (SIGS.answerMeta === meta) return;
     SIGS.answerMeta = meta;
     App.answerMeta.innerHTML = meta;
     App.answerMeta.querySelectorAll('[data-conf]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        App.net.send({
-          type: 'confidence', stageKey: key,
-          value: parseInt(btn.dataset.conf, 10)
-        });
+        App.net.send({ type: 'confidence', stageKey: key,
+                       value: parseInt(btn.dataset.conf, 10) });
       });
     });
   }
+
+  function renderActivity(room) {
+    if (!room.lastChange) { App.activityHost.innerHTML = ''; return; }
+    var h = 'Last change: <strong>' + C.esc(room.lastChange.by) + '</strong> ' +
+            C.esc(room.lastChange.what) + ' · ' + ago(room.lastChange.at);
+    if (SIGS.activity === h) return;
+    SIGS.activity = h;
+    App.activityHost.innerHTML = h;
+  }
+
+  function ago(ts) {
+    var d = Math.max(0, Date.now() - ts) / 1000;
+    if (d < 10) return 'just now';
+    if (d < 60) return Math.round(d) + 's ago';
+    if (d < 3600) return Math.round(d / 60) + ' min ago';
+    return Math.round(d / 3600) + ' h ago';
+  }
+
+  /* ------------------------------------------------------- group answers */
 
   function onAnswerInput() {
     var key = App.answerKey;
@@ -555,11 +623,9 @@
     App.inflight[key] = false;
     if (key !== App.answerKey || !App.ta) return;
     if (App.dirty[key]) { flushAnswer(key); return; }
-    // The server may have folded in a room-mate's edit; adopt the canonical text
     if (App.ta.value !== msg.text) setTextPreservingCaret(msg.text);
   }
 
-  /** Adopt remote text without throwing the caret to the end. */
   function setTextPreservingCaret(next) {
     var ta = App.ta;
     var before = ta.value;
@@ -579,7 +645,7 @@
     var key = App.answerKey;
     var doc = (room.answers && room.answers[key]) || { text: '', version: 0 };
     var ack = App.ack[key] || { text: '', version: -1 };
-    if (App.inflight[key] || App.dirty[key]) return;    // our own edit is in flight
+    if (App.inflight[key] || App.dirty[key]) return;
     if (!force && doc.version === ack.version) return;
     App.ack[key] = { text: doc.text, version: doc.version };
     if (App.ta.value !== doc.text) setTextPreservingCaret(doc.text);
@@ -594,143 +660,67 @@
     toast('Proposal sent. One of your group-mates needs to apply it.', 'info', 5000);
   }
 
-  /* ---------------------------------------------------- classroom overview */
+  /* ------------------------------------------------------------- glossary */
 
-  function openOverview() {
-    App.overviewOpen = true;
+  function openGlossary() {
     var scrim = el('div', 'scrim');
-    scrim.id = 'ov-scrim';
-    var modal = el('div', 'modal wide');
-    modal.id = 'ov-modal';
-    scrim.appendChild(modal);
-    document.body.appendChild(scrim);
-    scrim.addEventListener('click', function (e) { if (e.target === scrim) closeOverview(); });
-    document.addEventListener('keydown', ovEsc);
-    renderOverview();
-  }
-  function ovEsc(e) { if (e.key === 'Escape') closeOverview(); }
-  function closeOverview() {
-    App.overviewOpen = false;
-    var s = document.getElementById('ov-scrim');
-    if (s) s.remove();
-    document.removeEventListener('keydown', ovEsc);
-  }
-
-  function renderOverview() {
-    var modal = document.getElementById('ov-modal');
-    if (!modal) return;
-    var s = App.st, b = App.bundle;
-    modal.innerHTML = '';
+    var modal = el('div', 'modal wide glossary');
     var head = el('div', 'spread');
     var h = el('div');
-    h.appendChild(el('h2', null, 'Classroom Overview'));
+    h.appendChild(el('h2', null, 'What do these words mean?'));
     h.appendChild(el('p', 'small secondary',
-      'A read-only live view of what every room is doing. Nothing you do here can change ' +
-      'another room, and nothing they do changes yours.'));
+      'Every term this activity uses, in plain language. Nothing here assumes you ' +
+      'have met synthetic control before.'));
     head.appendChild(h);
     var x = el('button', 'ghost', 'Close');
     x.type = 'button';
-    x.addEventListener('click', closeOverview);
+    x.addEventListener('click', close);
     head.appendChild(x);
     modal.appendChild(head);
 
-    if (!s.classroom.revealCrossRoom) {
-      modal.appendChild(el('div', 'notice info',
-        '<span class="ic">i</span><div>Your facilitator has <strong>hidden other rooms\' ' +
-        'written answers</strong> until the discussion. You can still see what each room is ' +
-        'working on and watch their graphs.</div>'));
-    }
+    var search = document.createElement('input');
+    search.type = 'text';
+    search.placeholder = 'Search for a word…';
+    search.style.margin = '10px 0 4px';
+    modal.appendChild(search);
 
-    var grid = el('div', 'fac-grid');
-    grid.style.marginTop = '14px';
-    s.config.roomIds.forEach(function (id) {
-      var r = s.rooms[id];
-      var mine = id === s.you.roomId;
-      var card = el('div', 'card pad fac-room');
-      if (mine) card.style.borderColor = 'var(--series-1)';
+    var body = el('div');
+    modal.appendChild(body);
 
-      var hd = el('div', 'fr-head');
-      hd.innerHTML = '<h3>Room ' + id + (mine ? ' <span class="pill live">yours</span>' : '') +
-        '</h3><span class="pill ' + (r.frozen ? 'frozen' : r.occupancy ? 'live' : 'empty') +
-        '">' + (r.frozen ? 'paused' : r.occupancy + '/' + r.capacity) + '</span>';
-      card.appendChild(hd);
-
-      card.appendChild(el('div', 'small secondary',
-        'Stage ' + (r.stage + 1) + ' · ' + C.esc(s.stages[r.stage].title)));
-
-      if (r.seats.length) {
-        card.appendChild(el('div', 'tiny muted', r.seats.map(function (q) {
-          return C.esc(q.name);
-        }).join(', ')));
-      }
-
-      // Live read-only preview of this room's gap
-      var ph = el('div', 'chart-host');
-      card.appendChild(ph);
-      try {
-        var v = MV.compute(b, r.model);
-        C.lineChart(ph, {
-          years: b.years,
-          series: [{ name: 'Gap', values: v.gap, color: C.cssVar(mine ? '--series-1' : '--series-2') }],
-          vline: r.model.t0, vlabel: String(r.model.t0), zeroLine: true,
-          height: 150, yDp: 1, directLabels: false
+    function draw(q) {
+      q = (q || '').trim().toLowerCase();
+      body.innerHTML = '';
+      var any = false;
+      CONTENT.GLOSSARY.forEach(function (grp) {
+        var hits = grp.terms.filter(function (t) {
+          return !q || t.term.toLowerCase().indexOf(q) >= 0 ||
+                 t.def.toLowerCase().indexOf(q) >= 0;
         });
-        var dl = el('dl', 'kv');
-        dl.innerHTML =
-          '<dt>Donors</dt><dd>' + r.model.donors.length + ' of ' + b.donors.length + '</dd>' +
-          '<dt>Weights</dt><dd>' + C.esc(r.model.weightMode) + '</dd>' +
-          '<dt>Year</dt><dd>' + r.model.t0 + '</dd>' +
-          '<dt>Pre-fit</dt><dd>' + v.stats.rmspePre.toFixed(3) + '</dd>' +
-          '<dt>Mean gap</dt><dd>' + (v.effect.fullPeriod >= 0 ? '+' : '') +
-          v.effect.fullPeriod.toFixed(2) + '</dd>';
-        card.appendChild(dl);
-      } catch (e) {
-        ph.innerHTML = '<div class="tiny muted">Could not draw this room\'s model.</div>';
-      }
+        if (!hits.length) return;
+        any = true;
+        body.appendChild(el('h4', 'gloss-group', C.esc(grp.group)));
+        hits.forEach(function (t) {
+          var d = el('div', 'gloss-item');
+          d.appendChild(el('dt', null, C.esc(t.term)));
+          d.appendChild(el('dd', null, C.esc(t.def)));
+          body.appendChild(d);
+        });
+      });
+      if (!any) body.appendChild(el('p', 'muted', 'Nothing matches “' + C.esc(q) + '”.'));
+    }
+    draw('');
+    search.addEventListener('input', function () { draw(search.value); });
 
-      // Findings
-      if (r.answersVisible) {
-        var latest = null;
-        for (var i = s.stages.length - 1; i >= 0; i--) {
-          var a = r.answers && r.answers[s.stages[i].key];
-          if (a && a.text.trim()) { latest = { stage: s.stages[i], a: a }; break; }
-        }
-        if (latest) {
-          var fb = el('div');
-          fb.style.cssText = 'border-top:1px solid var(--grid);padding-top:8px';
-          fb.innerHTML = '<div class="tiny muted">' + C.esc(latest.stage.title) + '</div>' +
-            '<div class="small">' + C.esc(latest.a.text.slice(0, 320)) +
-            (latest.a.text.length > 320 ? '…' : '') + '</div>';
-          card.appendChild(fb);
-        } else {
-          card.appendChild(el('div', 'tiny muted', 'No written answer yet.'));
-        }
-      } else {
-        card.appendChild(el('div', 'tiny muted', 'Written answers hidden until the discussion.'));
-      }
-
-      if (r.lastChange) {
-        card.appendChild(el('div', 'tiny muted',
-          C.esc(r.lastChange.by) + ' ' + C.esc(r.lastChange.what) + ' · ' + ago(r.lastChange.at)));
-      }
-      grid.appendChild(card);
-    });
-    modal.appendChild(grid);
-  }
-
-  function ago(ts) {
-    var d = Math.max(0, Date.now() - ts) / 1000;
-    if (d < 10) return 'just now';
-    if (d < 60) return Math.round(d) + 's ago';
-    if (d < 3600) return Math.round(d / 60) + ' min ago';
-    return Math.round(d / 3600) + ' h ago';
-  }
-
-  function renderActivity(room) {
-    if (!room.lastChange) { App.activityHost.innerHTML = ''; return; }
-    App.activityHost.innerHTML = 'Last change in this room: <strong>' +
-      C.esc(room.lastChange.by) + '</strong> ' + C.esc(room.lastChange.what) +
-      ' · ' + ago(room.lastChange.at);
+    scrim.appendChild(modal);
+    document.body.appendChild(scrim);
+    setTimeout(function () { search.focus(); }, 40);
+    scrim.addEventListener('click', function (e) { if (e.target === scrim) close(); });
+    document.addEventListener('keydown', esc);
+    function esc(e) { if (e.key === 'Escape') close(); }
+    function close() {
+      scrim.remove();
+      document.removeEventListener('keydown', esc);
+    }
   }
 
   window.addEventListener('DOMContentLoaded', boot);
