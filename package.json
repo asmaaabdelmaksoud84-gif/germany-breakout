@@ -1,0 +1,14 @@
+{
+  "name": "synthetic-control-classroom",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A synchronized multiplayer classroom activity: did Germany's nuclear phase-out increase CO2 emissions?",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}

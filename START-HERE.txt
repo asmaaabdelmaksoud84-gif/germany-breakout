@@ -1,0 +1,21 @@
+DID GERMANY'S NUCLEAR PHASE-OUT INCREASE CO2 EMISSIONS?
+A classroom activity for four breakout groups.
+
+YOU DO NOT NEED TO UNDERSTAND ANY OF THESE FILES.
+
+To put this online for your students, follow the walkthrough document
+("Getting it online, step by step"). The short version:
+
+  1. Make a free GitHub account.
+  2. Create a new repository and drag ALL of these files into it.
+  3. Make a free Render account, connect it to that repository.
+  4. Render gives you a web address. That is your student link.
+
+There is no software to install and nothing to type into a terminal.
+
+Two links come out of it:
+  Students      https://your-address.onrender.com/
+  Facilitator   https://your-address.onrender.com/facilitator?key=YOUR-KEY
+
+Keep the facilitator link to yourself. Anyone with it can pause the
+rooms and export answers.

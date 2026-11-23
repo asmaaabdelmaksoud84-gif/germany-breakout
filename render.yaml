@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: synthetic-control-classroom
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: FACILITATOR_KEY
+        generateValue: true
+      - key: NODE_VERSION
+        value: "20"
